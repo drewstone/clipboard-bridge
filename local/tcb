@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+#
+# tcb - tmux-clipboard-bridge local CLI
+#
+# Run on your macOS machine to push clipboard images to a remote server
+# running tmux with the tmux-clipboard-bridge plugin.
+#
+# Commands:
+#   tcb push <user@host>           Push clipboard image to remote
+#   tcb push <user@host> --type    Push and type path into active tmux pane
+#   tcb setup                      Show SSH ControlMaster configuration
+#   tcb clean <user@host> [N]      Remove old images, keep last N (default 50)
+#   tcb help                       Show help
+#
+# Requirements (macOS):
+#   - osascript (built-in) or pngpaste (brew install pngpaste)
+#   - ssh/scp with key-based auth
+
+set -euo pipefail
+
+VERSION="1.0.0"
+REMOTE_IMAGE_DIR="${TCB_REMOTE_IMAGE_DIR:-.tmux/clipboard/images}"
+MAX_IMAGES="${TCB_MAX_IMAGES:-50}"
+
+# ── Colors ─────────────────────────────────────────────────────────────────
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+info()  { printf "${CYAN}[tcb]${NC} %s\n" "$*"; }
+ok()    { printf "${GREEN}[tcb]${NC} %s\n" "$*"; }
+warn()  { printf "${YELLOW}[tcb]${NC} %s\n" "$*"; }
+err()   { printf "${RED}[tcb]${NC} %s\n" "$*" >&2; }
+
+# ── Clipboard detection (macOS) ───────────────────────────────────────────
+clipboard_has_image() {
+    local cb_info
+    cb_info="$(osascript -e 'clipboard info' 2>/dev/null)" || return 1
+    echo "$cb_info" | grep -qi 'TIFF\|PNG\|PICT'
+}
+
+# ── Save clipboard image to file ──────────────────────────────────────────
+save_clipboard_image() {
+    local output_path="$1"
+
+    # Prefer pngpaste if available (faster)
+    if command -v pngpaste >/dev/null 2>&1; then
+        if pngpaste "$output_path" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # Fallback: osascript to extract TIFF, sips to convert to PNG
+    local tiff_tmp
+    tiff_tmp="$(mktemp /tmp/tcb-clip-XXXXXX.tiff)"
+
+    osascript -e "
+        set tiffData to the clipboard as «class TIFF»
+        set filePath to POSIX file \"$tiff_tmp\"
+        set fp to open for access filePath with write permission
+        write tiffData to fp
+        close access fp
+    " 2>/dev/null || {
+        rm -f "$tiff_tmp"
+        return 1
+    }
+
+    sips -s format png "$tiff_tmp" --out "$output_path" >/dev/null 2>&1 || {
+        rm -f "$tiff_tmp"
+        return 1
+    }
+
+    rm -f "$tiff_tmp"
+    return 0
+}
+
+# ── Push command ───────────────────────────────────────────────────────────
+cmd_push() {
+    local remote_host=""
+    local do_type=false
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --type|-t) do_type=true; shift ;;
+            --help|-h) cmd_help; exit 0 ;;
+            -*) err "Unknown option: $1"; exit 1 ;;
+            *)
+                if [ -z "$remote_host" ]; then
+                    remote_host="$1"
+                else
+                    err "Unexpected argument: $1"; exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$remote_host" ]; then
+        err "Usage: tcb push <user@host> [--type]"
+        exit 1
+    fi
+
+    # Check SSH connectivity
+    info "Connecting to $remote_host..."
+    if ! ssh -o ConnectTimeout=5 -o BatchMode=yes "$remote_host" true 2>/dev/null; then
+        err "Cannot SSH to $remote_host"
+        err "Ensure key auth is set up: ssh-copy-id $remote_host"
+        err "Run 'tcb setup' for tips."
+        exit 1
+    fi
+
+    # Check clipboard
+    info "Checking clipboard..."
+    if ! clipboard_has_image; then
+        err "No image in clipboard. Copy/screenshot an image first."
+        exit 1
+    fi
+
+    # Save image
+    local timestamp
+    timestamp="$(date '+%Y%m%dT%H%M%S')"
+    local tmp_file
+    tmp_file="$(mktemp "/tmp/tcb-${timestamp}-XXXXXX.png")"
+
+    info "Extracting image from clipboard..."
+    if ! save_clipboard_image "$tmp_file"; then
+        rm -f "$tmp_file"
+        err "Failed to extract clipboard image."
+        exit 1
+    fi
+
+    local file_size
+    file_size="$(stat -f%z "$tmp_file" 2>/dev/null || wc -c < "$tmp_file")"
+    info "Image: $(( file_size / 1024 ))KB"
+
+    # Ensure remote directory exists
+    ssh "$remote_host" "mkdir -p ~/$REMOTE_IMAGE_DIR" 2>/dev/null
+
+    # Upload
+    local remote_filename="${timestamp}.png"
+    local remote_path="~/$REMOTE_IMAGE_DIR/$remote_filename"
+
+    info "Uploading to $remote_host:$remote_path..."
+    if ! scp -q "$tmp_file" "$remote_host:$remote_path"; then
+        rm -f "$tmp_file"
+        err "SCP failed."
+        exit 1
+    fi
+    rm -f "$tmp_file"
+
+    # Clean old images
+    ssh "$remote_host" "
+        cd ~/$REMOTE_IMAGE_DIR 2>/dev/null || exit 0
+        ls -1t *.png 2>/dev/null | tail -n +$((MAX_IMAGES + 1)) | xargs -r rm -f
+    " 2>/dev/null || true
+
+    # Resolve full path
+    local full_remote_path
+    full_remote_path="$(ssh "$remote_host" "echo ~/$REMOTE_IMAGE_DIR/$remote_filename")"
+
+    ok "Uploaded: $full_remote_path"
+
+    # Type path into tmux pane if requested
+    if [ "$do_type" = true ]; then
+        info "Typing path into tmux pane..."
+        if ssh "$remote_host" "tmux send-keys -l '$full_remote_path'" 2>/dev/null; then
+            ok "Path typed into active pane."
+        else
+            warn "Could not type path (is tmux running?)"
+            warn "Path: $full_remote_path"
+        fi
+    fi
+}
+
+# ── Clean command ──────────────────────────────────────────────────────────
+cmd_clean() {
+    local remote_host="${1:-}"
+    local keep="${2:-$MAX_IMAGES}"
+
+    if [ -z "$remote_host" ]; then
+        err "Usage: tcb clean <user@host> [keep-count]"
+        exit 1
+    fi
+
+    info "Cleaning images on $remote_host (keeping last $keep)..."
+    local removed
+    removed="$(ssh "$remote_host" "
+        cd ~/$REMOTE_IMAGE_DIR 2>/dev/null || exit 0
+        count=\$(ls -1t *.png 2>/dev/null | tail -n +$((keep + 1)) | wc -l)
+        ls -1t *.png 2>/dev/null | tail -n +$((keep + 1)) | xargs -r rm -f
+        echo \$count
+    " 2>/dev/null)"
+
+    ok "Removed ${removed:-0} old images."
+}
+
+# ── Setup guide ────────────────────────────────────────────────────────────
+cmd_setup() {
+    cat <<'SETUP'
+tmux-clipboard-bridge: SSH setup guide
+=======================================
+
+1. SSH Key Authentication (required)
+-------------------------------------
+    ssh-keygen -t ed25519
+    ssh-copy-id user@your-server
+
+2. SSH ControlMaster (recommended — makes tcb push nearly instant)
+-------------------------------------------------------------------
+Add to your local ~/.ssh/config:
+
+    Host your-server
+        HostName your-server.example.com
+        User your-username
+        ControlMaster auto
+        ControlPath ~/.ssh/sockets/%r@%h-%p
+        ControlPersist 600
+
+Then:
+    mkdir -p ~/.ssh/sockets
+
+3. Shell Alias (optional)
+--------------------------
+Add to ~/.zshrc or ~/.bashrc:
+
+    alias tp='tcb push user@your-server --type'
+
+Then: copy image → run 'tp' → path appears in tmux pane.
+
+4. Install pngpaste (optional, faster clipboard extraction)
+------------------------------------------------------------
+    brew install pngpaste
+SETUP
+}
+
+# ── Help ───────────────────────────────────────────────────────────────────
+cmd_help() {
+    cat <<HELP
+tcb - tmux-clipboard-bridge local CLI (v$VERSION)
+
+Usage:
+    tcb push <user@host> [--type]    Push clipboard image to remote
+    tcb clean <user@host> [N]        Remove old images, keep last N (default: $MAX_IMAGES)
+    tcb setup                        Show SSH setup guide
+    tcb help                         Show this message
+
+Options for 'push':
+    --type, -t    Also type the image path into the active tmux pane
+
+Examples:
+    tcb push drew@myserver                Upload clipboard image
+    tcb push drew@myserver --type         Upload + type path into tmux
+    tcb clean drew@myserver 20            Keep only last 20 images
+
+Environment:
+    TCB_REMOTE_IMAGE_DIR    Remote image path (default: $REMOTE_IMAGE_DIR)
+    TCB_MAX_IMAGES          Max images to keep (default: $MAX_IMAGES)
+HELP
+}
+
+# ── Main ───────────────────────────────────────────────────────────────────
+case "${1:-help}" in
+    push)   shift; cmd_push "$@" ;;
+    clean)  shift; cmd_clean "$@" ;;
+    setup)  cmd_setup ;;
+    help|--help|-h) cmd_help ;;
+    *)      err "Unknown command: $1"; cmd_help; exit 1 ;;
+esac
