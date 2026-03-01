@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""
+tcb-server — Clipboard server for tmux-clipboard-bridge.
+
+Listens on a local port and serves your macOS clipboard content (text or image)
+to remote clients via SSH reverse tunnel.
+
+Usage:
+    tcb-server              Start on default port (19988)
+    tcb-server --port 9999  Start on custom port
+    tcb-server --once       Serve one request and exit (for testing)
+
+SSH setup:
+    ssh -R 19988:localhost:19988 user@server
+
+Or in ~/.ssh/config:
+    Host myserver
+        RemoteForward 19988 localhost:19988
+"""
+
+import argparse
+import base64
+import json
+import os
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+
+
+def has_image_clipboard():
+    """Check if macOS clipboard contains an image."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", "clipboard info"],
+            capture_output=True, text=True, timeout=5
+        )
+        return any(t in result.stdout for t in ["TIFF", "PNG", "PICT"])
+    except Exception:
+        return False
+
+
+def get_clipboard_image():
+    """Extract clipboard image as PNG bytes. Returns bytes or None."""
+    tmp_png = tempfile.mktemp(suffix=".png")
+
+    try:
+        # Try pngpaste first (faster if installed via brew)
+        for pngpaste_path in ["/opt/homebrew/bin/pngpaste", "/usr/local/bin/pngpaste"]:
+            if os.path.exists(pngpaste_path):
+                result = subprocess.run(
+                    [pngpaste_path, tmp_png],
+                    capture_output=True, timeout=10
+                )
+                if result.returncode == 0 and os.path.exists(tmp_png):
+                    with open(tmp_png, "rb") as f:
+                        data = f.read()
+                    os.unlink(tmp_png)
+                    return data
+
+        # Fallback: osascript → TIFF → sips → PNG
+        tmp_tiff = tempfile.mktemp(suffix=".tiff")
+        subprocess.run(
+            ["osascript", "-e", f"""
+                set tiffData to the clipboard as «class TIFF»
+                set filePath to POSIX file "{tmp_tiff}"
+                set fp to open for access filePath with write permission
+                write tiffData to fp
+                close access fp
+            """],
+            capture_output=True, timeout=10
+        )
+
+        if os.path.exists(tmp_tiff):
+            subprocess.run(
+                ["sips", "-s", "format", "png", tmp_tiff, "--out", tmp_png],
+                capture_output=True, timeout=10
+            )
+            os.unlink(tmp_tiff)
+
+            if os.path.exists(tmp_png):
+                with open(tmp_png, "rb") as f:
+                    data = f.read()
+                os.unlink(tmp_png)
+                return data
+
+    except Exception:
+        pass
+    finally:
+        for f in [tmp_png]:
+            if os.path.exists(f):
+                os.unlink(f)
+
+    return None
+
+
+def get_clipboard_text():
+    """Get text from macOS clipboard."""
+    try:
+        result = subprocess.run(
+            ["pbpaste"],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.stdout
+    except Exception:
+        return ""
+
+
+def get_clipboard():
+    """Return clipboard content as a JSON string."""
+    if has_image_clipboard():
+        img_data = get_clipboard_image()
+        if img_data:
+            return json.dumps({
+                "type": "image",
+                "format": "png",
+                "size": len(img_data),
+                "data": base64.b64encode(img_data).decode("ascii"),
+            })
+
+    # Fall back to text
+    text = get_clipboard_text()
+    return json.dumps({
+        "type": "text",
+        "data": text,
+    })
+
+
+def handle_client(conn):
+    """Handle a single client connection."""
+    try:
+        # Read any incoming data (client might send a newline or nothing)
+        conn.settimeout(1.0)
+        try:
+            conn.recv(1024)
+        except socket.timeout:
+            pass
+
+        response = get_clipboard()
+        # Send length-prefixed response so client knows when data ends
+        response_bytes = response.encode("utf-8")
+        header = f"{len(response_bytes)}\n".encode("utf-8")
+        conn.sendall(header + response_bytes)
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    finally:
+        conn.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Clipboard server for tmux-clipboard-bridge")
+    parser.add_argument("--port", type=int, default=19988, help="Port to listen on (default: 19988)")
+    parser.add_argument("--once", action="store_true", help="Serve one request and exit")
+    args = parser.parse_args()
+
+    # Handle Ctrl+C gracefully
+    signal.signal(signal.SIGINT, lambda s, f: (print("\ntcb-server stopped."), sys.exit(0)))
+    signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    try:
+        sock.bind(("127.0.0.1", args.port))
+    except OSError as e:
+        print(f"tcb-server: cannot bind to port {args.port}: {e}", file=sys.stderr)
+        print("Is another instance running? Kill it with: pkill -f tcb-server", file=sys.stderr)
+        sys.exit(1)
+
+    sock.listen(5)
+    print(f"tcb-server listening on 127.0.0.1:{args.port}")
+    print(f"SSH with: ssh -R {args.port}:localhost:{args.port} user@server")
+    print("Press Ctrl+C to stop.")
+
+    while True:
+        conn, addr = sock.accept()
+        handle_client(conn)
+        if args.once:
+            break
+
+    sock.close()
+
+
+if __name__ == "__main__":
+    main()

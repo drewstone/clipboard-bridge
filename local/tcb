@@ -1,26 +1,34 @@
 #!/usr/bin/env bash
 #
-# tcb - tmux-clipboard-bridge local CLI
+# tcb - clipboard-bridge local CLI
 #
-# Run on your macOS machine to push clipboard images to a remote server
-# running tmux with the tmux-clipboard-bridge plugin.
+# Run on your macOS machine to bridge clipboard (text + images) to remote
+# SSH/tmux sessions. Two modes:
+#
+#   1. Server mode: runs tcb-server daemon for real-time Ctrl+V / prefix+v
+#   2. Push mode:   one-shot SCP of clipboard image to remote
 #
 # Commands:
-#   tcb push <user@host>           Push clipboard image to remote
+#   tcb server [--port N]          Start clipboard server (for reverse tunnel)
+#   tcb ssh <user@host>            SSH with reverse tunnel (auto-connects server)
+#   tcb push <user@host>           Push clipboard image to remote (one-shot)
 #   tcb push <user@host> --type    Push and type path into active tmux pane
-#   tcb setup                      Show SSH ControlMaster configuration
+#   tcb setup                      Show SSH/ControlMaster configuration
 #   tcb clean <user@host> [N]      Remove old images, keep last N (default 50)
 #   tcb help                       Show help
 #
 # Requirements (macOS):
+#   - Python 3 (for tcb-server)
 #   - osascript (built-in) or pngpaste (brew install pngpaste)
 #   - ssh/scp with key-based auth
 
 set -euo pipefail
 
-VERSION="1.0.0"
+VERSION="2.0.0"
 REMOTE_IMAGE_DIR="${TCB_REMOTE_IMAGE_DIR:-.tmux/clipboard/images}"
 MAX_IMAGES="${TCB_MAX_IMAGES:-50}"
+SERVER_PORT="${TCB_SERVER_PORT:-19988}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Colors ─────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -196,24 +204,140 @@ cmd_clean() {
     ok "Removed ${removed:-0} old images."
 }
 
+# ── Server command ─────────────────────────────────────────────────────────
+cmd_server() {
+    local port="$SERVER_PORT"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port|-p) port="$2"; shift 2 ;;
+            --help|-h) echo "Usage: tcb server [--port N]"; exit 0 ;;
+            *) err "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    # Find tcb-server (same directory as tcb, or in PATH)
+    local server_bin=""
+    if [ -f "${SCRIPT_DIR}/tcb-server" ]; then
+        server_bin="${SCRIPT_DIR}/tcb-server"
+    elif command -v tcb-server >/dev/null 2>&1; then
+        server_bin="$(command -v tcb-server)"
+    else
+        err "tcb-server not found."
+        err "Expected at: ${SCRIPT_DIR}/tcb-server"
+        err "Install: curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server"
+        exit 1
+    fi
+
+    info "Starting clipboard server on port $port..."
+    info "SSH with: ssh -R ${port}:localhost:${port} user@server"
+    info "Or run: tcb ssh user@server"
+    echo ""
+    exec python3 "$server_bin" --port "$port"
+}
+
+# ── SSH command ────────────────────────────────────────────────────────────
+cmd_ssh() {
+    local remote_host=""
+    local port="$SERVER_PORT"
+    local extra_args=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port|-p) port="$2"; shift 2 ;;
+            --help|-h) echo "Usage: tcb ssh <user@host> [--port N] [-- extra ssh args]"; exit 0 ;;
+            --) shift; extra_args=("$@"); break ;;
+            -*)
+                # Pass unknown flags through to ssh
+                extra_args+=("$1")
+                shift
+                ;;
+            *)
+                if [ -z "$remote_host" ]; then
+                    remote_host="$1"
+                else
+                    extra_args+=("$1")
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$remote_host" ]; then
+        err "Usage: tcb ssh <user@host> [--port N]"
+        exit 1
+    fi
+
+    # Start tcb-server in the background if not already running
+    if ! nc -z localhost "$port" 2>/dev/null; then
+        info "Starting clipboard server on port $port..."
+
+        local server_bin=""
+        if [ -f "${SCRIPT_DIR}/tcb-server" ]; then
+            server_bin="${SCRIPT_DIR}/tcb-server"
+        elif command -v tcb-server >/dev/null 2>&1; then
+            server_bin="$(command -v tcb-server)"
+        else
+            warn "tcb-server not found. Server mode won't work."
+            warn "Falling back to plain SSH with reverse tunnel."
+        fi
+
+        if [ -n "$server_bin" ]; then
+            python3 "$server_bin" --port "$port" &
+            local server_pid=$!
+            # Give it a moment to start
+            sleep 0.5
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+                warn "tcb-server failed to start."
+            else
+                ok "Clipboard server running (PID $server_pid)"
+                # Clean up server when SSH exits
+                trap "kill $server_pid 2>/dev/null" EXIT
+            fi
+        fi
+    else
+        ok "Clipboard server already running on port $port"
+    fi
+
+    info "Connecting to $remote_host with reverse tunnel on port $port..."
+    echo ""
+    exec ssh -R "${port}:localhost:${port}" "${extra_args[@]}" "$remote_host"
+}
+
 # ── Setup guide ────────────────────────────────────────────────────────────
 cmd_setup() {
     cat <<'SETUP'
-tmux-clipboard-bridge: SSH setup guide
-=======================================
+clipboard-bridge: Setup guide
+==============================
+
+QUICK START (recommended — Ctrl+V for everything):
+
+    # Terminal tab 1: start the clipboard server
+    tcb server
+
+    # Terminal tab 2: SSH with reverse tunnel
+    tcb ssh user@your-server
+
+    # Or in one command (auto-starts server):
+    tcb ssh user@your-server
+
+    Now Ctrl+V and prefix+v work for text AND images in remote tmux.
+
+---
 
 1. SSH Key Authentication (required)
 -------------------------------------
     ssh-keygen -t ed25519
     ssh-copy-id user@your-server
 
-2. SSH ControlMaster (recommended — makes tcb push nearly instant)
--------------------------------------------------------------------
-Add to your local ~/.ssh/config:
+2. SSH config with reverse tunnel (recommended)
+-------------------------------------------------
+Add to your local ~/.ssh/config so every SSH session has the tunnel:
 
     Host your-server
         HostName your-server.example.com
         User your-username
+        RemoteForward 19988 localhost:19988
         ControlMaster auto
         ControlPath ~/.ssh/sockets/%r@%h-%p
         ControlPersist 600
@@ -221,40 +345,66 @@ Add to your local ~/.ssh/config:
 Then:
     mkdir -p ~/.ssh/sockets
 
+With this config, just run 'tcb server' once on your Mac, then
+'ssh your-server' normally. Ctrl+V works in tmux automatically.
+
 3. Shell Alias (optional)
 --------------------------
 Add to ~/.zshrc or ~/.bashrc:
 
     alias tp='tcb push user@your-server --type'
-
-Then: copy image → run 'tp' → path appears in tmux pane.
+    alias ts='tcb ssh user@your-server'
 
 4. Install pngpaste (optional, faster clipboard extraction)
 ------------------------------------------------------------
     brew install pngpaste
+
+5. LaunchAgent (optional — auto-start server on login)
+-------------------------------------------------------
+Save to ~/Library/LaunchAgents/com.tcb.server.plist:
+
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+      "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+        <key>Label</key><string>com.tcb.server</string>
+        <key>ProgramArguments</key>
+        <array>
+            <string>/usr/bin/python3</string>
+            <string>$HOME/.local/bin/tcb-server</string>
+        </array>
+        <key>RunAtLoad</key><true/>
+        <key>KeepAlive</key><true/>
+    </dict>
+    </plist>
+
+Then: launchctl load ~/Library/LaunchAgents/com.tcb.server.plist
 SETUP
 }
 
 # ── Help ───────────────────────────────────────────────────────────────────
 cmd_help() {
     cat <<HELP
-tcb - tmux-clipboard-bridge local CLI (v$VERSION)
+tcb - clipboard-bridge local CLI (v$VERSION)
 
 Usage:
-    tcb push <user@host> [--type]    Push clipboard image to remote
+    tcb server [--port N]            Start clipboard server (default port: $SERVER_PORT)
+    tcb ssh <user@host> [--port N]   SSH with reverse tunnel (auto-starts server)
+    tcb push <user@host> [--type]    Push clipboard image to remote (one-shot)
     tcb clean <user@host> [N]        Remove old images, keep last N (default: $MAX_IMAGES)
-    tcb setup                        Show SSH setup guide
+    tcb setup                        Show full setup guide
     tcb help                         Show this message
 
-Options for 'push':
-    --type, -t    Also type the image path into the active tmux pane
+Quick start:
+    tcb ssh drew@myserver            Starts server + SSH with reverse tunnel
+                                     Then Ctrl+V / prefix+v works in remote tmux
 
-Examples:
-    tcb push drew@myserver                Upload clipboard image
-    tcb push drew@myserver --type         Upload + type path into tmux
-    tcb clean drew@myserver 20            Keep only last 20 images
+One-shot mode:
+    tcb push drew@myserver --type    Upload clipboard image + type path into pane
 
 Environment:
+    TCB_SERVER_PORT         Server port (default: $SERVER_PORT)
     TCB_REMOTE_IMAGE_DIR    Remote image path (default: $REMOTE_IMAGE_DIR)
     TCB_MAX_IMAGES          Max images to keep (default: $MAX_IMAGES)
 HELP
@@ -262,6 +412,8 @@ HELP
 
 # ── Main ───────────────────────────────────────────────────────────────────
 case "${1:-help}" in
+    server) shift; cmd_server "$@" ;;
+    ssh)    shift; cmd_ssh "$@" ;;
     push)   shift; cmd_push "$@" ;;
     clean)  shift; cmd_clean "$@" ;;
     setup)  cmd_setup ;;

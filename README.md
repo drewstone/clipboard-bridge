@@ -1,143 +1,166 @@
-# tmux-clipboard-bridge
+# clipboard-bridge
 
-Fix clipboard and image pasting in tmux over SSH. Built for developers who use AI coding agents (Claude Code, Codex, etc.) in remote tmux sessions.
+Fix clipboard (text + images) in SSH and tmux sessions. Ctrl+V that actually works over SSH.
 
-## What it solves
+Built for developers who use AI coding agents (Claude Code, Codex, etc.) on remote servers.
 
-| Problem | Fix |
-|---|---|
-| Mouse selection vanishes on release | Uses `copy-pipe-no-clear` — highlight persists until you press `q`/`Esc` |
-| Text clipboard doesn't sync over SSH | OSC 52 escape sequences with `allow-passthrough` enabled |
-| Can't paste images from local machine | Local CLI (`tcb`) pushes clipboard images via SCP + tmux keybindings insert the path |
+## The problem
 
-## Requirements
+When you SSH into a remote server:
+- **Ctrl+V with text** works (terminal sends text bytes through SSH)
+- **Ctrl+V with an image** does nothing (terminals can't send image bytes through SSH)
+- **In tmux**, even text clipboard breaks without OSC 52 passthrough
 
-- tmux 3.3+ (for `allow-passthrough`)
-- [TPM](https://github.com/tmux-plugins/tpm) (Tmux Plugin Manager)
-- [tmux-yank](https://github.com/tmux-plugins/tmux-yank) (this plugin configures it, not replaces it)
-- A terminal that supports OSC 52: Warp, iTerm2, Ghostty, Kitty, Alacritty, Windows Terminal
+## The solution
 
-## Install
+Two components working together:
 
-### 1. Add to `tmux.conf`
+1. **`tcb-server`** runs on your Mac — serves your clipboard (text + images) over a local port
+2. **SSH reverse tunnel** connects that port back to the remote server
+3. **tmux plugin** — `Ctrl+V` / `prefix+v` fetches clipboard through the tunnel
 
-**Important:** Add this plugin **before** tmux-yank in your config:
-
-```tmux
-# ... other plugins ...
-set -g @plugin 'drewstone/tmux-clipboard-bridge'
-set -g @plugin 'tmux-plugins/tmux-yank'
-# ... rest of config ...
+```
+┌─ Your Mac ─────────────────────┐     ┌─ Remote Server ──────────────┐
+│                                │     │                              │
+│  tcb-server (:19988)           │◄────│  SSH reverse tunnel          │
+│    clipboard has text? → send  │     │    ↓                         │
+│    clipboard has image? → send │     │  Ctrl+V / prefix+v:          │
+│                                │     │    text → paste into pane    │
+│                                │     │    image → save file, type   │
+│                                │     │           path into pane     │
+└────────────────────────────────┘     └──────────────────────────────┘
 ```
 
-### 2. Install via TPM
+## Quick start
+
+### 1. Install on your Mac
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb \
+  -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server \
+  -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server
+```
+
+### 2. SSH with clipboard bridge
+
+```bash
+# One command — starts server + SSH with reverse tunnel:
+tcb ssh user@your-server
+```
+
+### 3. Install tmux plugin on the remote (optional, for tmux features)
+
+Add to your remote `~/.tmux.conf` **before** tmux-yank:
+
+```tmux
+set -g @plugin 'drewstone/clipboard-bridge'
+set -g @plugin 'tmux-plugins/tmux-yank'
+```
 
 Press `prefix + I` to install.
 
-### 3. (Optional) Install local CLI for image support
+### 4. Use it
 
-On your **local macOS machine**:
-
-```bash
-# Option A: Direct download
-curl -fsSL https://raw.githubusercontent.com/drewstone/tmux-clipboard-bridge/main/local/tcb \
-  -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
-
-# Option B: Clone and symlink
-git clone https://github.com/drewstone/tmux-clipboard-bridge.git ~/tmux-clipboard-bridge
-ln -s ~/tmux-clipboard-bridge/local/tcb ~/.local/bin/tcb
-```
-
-## Usage
-
-### Text clipboard (automatic)
-
-Just select text normally — it syncs to your local clipboard via OSC 52:
-
-- **Mouse drag** — select text, release, it's in your clipboard (highlight stays visible)
-- **Double-click** — select word
-- **Triple-click** — select line
-- **Vi copy-mode** — `prefix + [`, select with `v`, yank with `y`
-
-Press `q` or `Esc` to exit copy-mode and clear the highlight.
-
-### Image clipboard (via `tcb` CLI)
-
-From your **local Mac**:
-
-```bash
-# Copy/screenshot an image, then:
-tcb push user@your-server           # upload image
-tcb push user@your-server --type    # upload + type path into tmux pane
-```
-
-From your **remote tmux session**:
-
-| Binding | Action |
-|---|---|
-| `prefix + P` | Insert latest image path into pane |
-| `prefix + M-p` | Open fzf picker to choose from uploaded images |
-
-### Typical workflow with Claude Code
-
-1. Screenshot something on your Mac
-2. `tcb push drew@server --type`
-3. Image path appears in the tmux pane where Claude Code is running
-4. Claude Code reads the image file
-
-### `tcb` commands
-
-```
-tcb push <user@host> [--type]    Push clipboard image to remote
-tcb clean <user@host> [N]        Clean old images, keep last N (default: 50)
-tcb setup                        Show SSH ControlMaster setup guide
-tcb help                         Show help
-```
-
-## Configuration
-
-All options use the `@tcb_` prefix:
-
-```tmux
-# Image storage directory (default: ~/.tmux/clipboard/images)
-set -g @tcb_image_dir "$HOME/.tmux/clipboard/images"
-
-# Key bindings (default: P and M-p)
-set -g @tcb_image_latest_key "P"
-set -g @tcb_image_pick_key "M-p"
-
-# Passthrough mode: "on" (default), "all", or "off"
-set -g @tcb_passthrough "on"
-
-# Yank action: "copy-pipe-no-clear" (default) or "copy-pipe-and-cancel"
-set -g @tcb_yank_action "copy-pipe-no-clear"
-```
+- **`Ctrl+V`** — pastes text or image from your Mac clipboard (auto-detects)
+- **`prefix + v`** — same thing, if you prefer a prefixed binding
+- **`prefix + P`** — insert latest image path
+- **`prefix + M-p`** — fzf picker for all uploaded images
+- Mouse selection — highlight persists (doesn't vanish on release)
 
 ## How it works
 
 ### Text clipboard
 
-1. Plugin enables `allow-passthrough on` in tmux
-2. Sets `@override_copy_command` to an OSC 52 script (so tmux-yank works without xclip/xsel on headless servers)
-3. Sets `@yank_action` to `copy-pipe-no-clear` (selection persists)
-4. When you copy text, it's base64-encoded and sent via OSC 52 through tmux's DCS passthrough to your terminal, which puts it in your system clipboard
+Two mechanisms for maximum compatibility:
+
+1. **OSC 52** — tmux sends clipboard data via escape sequences through SSH to your terminal (handles mouse selection and `y` yank automatically)
+2. **Reverse tunnel** — `Ctrl+V` fetches text from your Mac's clipboard through the tunnel and pastes it
 
 ### Image clipboard
 
-There's no terminal standard for pasting images over SSH. The `tcb` CLI bridges this gap:
+1. You copy/screenshot an image on your Mac
+2. Press `Ctrl+V` (or `prefix+v`) in the remote tmux session
+3. The plugin connects to `tcb-server` via the reverse tunnel
+4. Server extracts the image from your Mac clipboard, sends it as base64
+5. Remote script decodes it, saves to `~/.tmux/clipboard/images/`, types the path
 
-1. Grabs the image from your macOS clipboard (via `pngpaste` or `osascript`)
-2. SCPs it to `~/.tmux/clipboard/images/` on the remote server
-3. Optionally types the file path into the active tmux pane
+For Claude Code / Codex: the image path gets typed into the pane, and the AI agent can read the file.
 
-## Tips
+## Commands
 
-- **SSH ControlMaster** makes `tcb push` nearly instant after the first connection. Run `tcb setup` for configuration help.
-- **Install `pngpaste`** on your Mac (`brew install pngpaste`) for faster clipboard extraction.
-- **Set up an alias** for quick access:
-  ```bash
-  alias tp='tcb push drew@myserver --type'
-  ```
+### Local (on your Mac)
+
+```
+tcb server [--port N]            Start clipboard server (default: 19988)
+tcb ssh <user@host> [--port N]   SSH with reverse tunnel (auto-starts server)
+tcb push <user@host> [--type]    One-shot: push clipboard image via SCP
+tcb clean <user@host> [N]        Remove old images, keep last N (default: 50)
+tcb setup                        Show full setup guide
+```
+
+### Remote (tmux bindings)
+
+| Binding | Action |
+|---|---|
+| `Ctrl+V` | Smart paste — text or image from Mac clipboard |
+| `prefix + v` | Same as Ctrl+V (prefixed version) |
+| `prefix + P` | Insert latest image path |
+| `prefix + M-p` | fzf picker for uploaded images |
+| Mouse drag | Select + copy (highlight persists) |
+| Double-click | Select word |
+| Triple-click | Select line |
+
+## Configuration
+
+```tmux
+# Tmux options (all optional, showing defaults)
+set -g @tcb_server_port "19988"                   # Reverse tunnel port
+set -g @tcb_paste_key "v"                         # prefix + ? for smart paste
+set -g @tcb_image_latest_key "P"                  # prefix + ? for latest image
+set -g @tcb_image_pick_key "M-p"                  # prefix + ? for fzf picker
+set -g @tcb_ctrl_v "on"                           # Bind bare Ctrl+V (off to disable)
+set -g @tcb_passthrough "on"                      # OSC 52 passthrough mode
+set -g @tcb_yank_action "copy-pipe-no-clear"      # Selection persistence
+set -g @tcb_image_dir "$HOME/.tmux/clipboard/images"
+```
+
+## Requirements
+
+- **Remote:** tmux 3.3+ (for `allow-passthrough`), Python 3 (for JSON parsing)
+- **Local (Mac):** Python 3, `osascript` (built-in), optionally `pngpaste` (`brew install pngpaste`)
+- **Terminal:** Any terminal supporting OSC 52 — Warp, iTerm2, Ghostty, Kitty, Alacritty
+
+## Advanced setup
+
+### Auto-start server on Mac login
+
+Run `tcb setup` for LaunchAgent instructions.
+
+### SSH config with permanent tunnel
+
+Add to `~/.ssh/config` on your Mac:
+
+```
+Host myserver
+    HostName your-server.example.com
+    User your-username
+    RemoteForward 19988 localhost:19988
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+```
+
+Then just `ssh myserver` — the tunnel is always there. Run `tcb server` once and forget about it.
+
+### Ctrl+V and vim
+
+The `Ctrl+V` binding detects vim/nvim/vi and passes through. To disable bare Ctrl+V:
+
+```tmux
+set -g @tcb_ctrl_v "off"
+```
 
 ## License
 

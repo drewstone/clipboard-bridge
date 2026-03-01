@@ -19,8 +19,10 @@ source "${SCRIPTS_DIR}/helpers.sh"
 TCB_IMAGE_DIR="$(get_tmux_option "@tcb_image_dir" "$HOME/.tmux/clipboard/images")"
 TCB_IMAGE_LATEST_KEY="$(get_tmux_option "@tcb_image_latest_key" "P")"
 TCB_IMAGE_PICK_KEY="$(get_tmux_option "@tcb_image_pick_key" "M-p")"
+TCB_PASTE_KEY="$(get_tmux_option "@tcb_paste_key" "v")"
 TCB_PASSTHROUGH="$(get_tmux_option "@tcb_passthrough" "on")"
 TCB_YANK_ACTION="$(get_tmux_option "@tcb_yank_action" "copy-pipe-no-clear")"
+TCB_SERVER_PORT="$(get_tmux_option "@tcb_server_port" "19988")"
 
 # ── 1. Enable allow-passthrough for OSC 52 ────────────────────────────────
 if [ "$TCB_PASSTHROUGH" != "off" ]; then
@@ -78,3 +80,22 @@ tmux bind-key "$TCB_IMAGE_LATEST_KEY" \
 # prefix + M-p: fzf picker for clipboard images
 tmux bind-key "$TCB_IMAGE_PICK_KEY" \
     run-shell -b "${SCRIPTS_DIR}/image-pick.sh '${TCB_IMAGE_DIR}'"
+
+# ── 7. Smart clipboard paste via reverse tunnel ───────────────────────────
+# prefix + v: fetch clipboard from local machine (text or image) via
+# tcb-server running on the local side through SSH reverse tunnel.
+# Falls back to tmux paste-buffer if tunnel is unavailable.
+tmux bind-key "$TCB_PASTE_KEY" \
+    run-shell "${SCRIPTS_DIR}/clipboard-paste.sh '${TCB_SERVER_PORT}' '${TCB_IMAGE_DIR}'"
+
+# C-v (no prefix): same as above, but passes through to vim/nvim/vi
+# when those are the active pane command. Configurable via @tcb_ctrl_v.
+TCB_CTRL_V="$(get_tmux_option "@tcb_ctrl_v" "on")"
+if [ "$TCB_CTRL_V" = "on" ]; then
+    tmux bind-key -n C-v \
+        if-shell 'test "$(tmux display-message -p "#{pane_current_command}")" = "vim" -o \
+                       "$(tmux display-message -p "#{pane_current_command}")" = "nvim" -o \
+                       "$(tmux display-message -p "#{pane_current_command}")" = "vi"' \
+            'send-keys C-v' \
+            "run-shell '${SCRIPTS_DIR}/clipboard-paste.sh ${TCB_SERVER_PORT} ${TCB_IMAGE_DIR}'"
+fi
