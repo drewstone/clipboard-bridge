@@ -15,12 +15,12 @@ When you SSH into a remote server:
 
 Two components working together:
 
-1. **`tcb-server`** runs on your Mac — serves your clipboard (text + images) over a local port
+1. **`tcb-server`** runs on your local machine — serves your clipboard (text + images) over a local port
 2. **SSH reverse tunnel** connects that port back to the remote server
 3. **tmux plugin** — `Ctrl+V` / `prefix+v` fetches clipboard through the tunnel
 
 ```
-┌─ Your Mac ─────────────────────┐     ┌─ Remote Server ──────────────┐
+┌─ Local Machine ────────────────┐     ┌─ Remote Server ──────────────┐
 │                                │     │                              │
 │  tcb-server (:19988)           │◄────│  SSH reverse tunnel          │
 │    clipboard has text? → send  │     │    ↓                         │
@@ -31,28 +31,119 @@ Two components working together:
 └────────────────────────────────┘     └──────────────────────────────┘
 ```
 
-## Quick start
+## Install
 
-### 1. Install on your Mac
+<details>
+<summary><b>macOS</b> (Warp, iTerm2, Ghostty, Kitty, Alacritty)</summary>
+
+### 1. Download the CLI tools
 
 ```bash
 mkdir -p ~/.local/bin
-curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb \
-  -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
-curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server \
-  -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server
 ```
 
-### 2. SSH with clipboard bridge
+Make sure `~/.local/bin` is in your PATH:
 
 ```bash
-# One command — starts server + SSH with reverse tunnel:
-tcb ssh user@your-server
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 ```
 
-### 3. Install tmux plugin on the remote (optional, for tmux features)
+### 2. One-command setup
 
-Add to your remote `~/.tmux.conf` **before** tmux-yank:
+```bash
+tcb install user@your-server
+```
+
+This does three things:
+- Adds `RemoteForward 19988 localhost:19988` to your `~/.ssh/config`
+- Installs a LaunchAgent so `tcb-server` starts automatically on login
+- Starts `tcb-server` immediately
+
+After this, just `ssh user@your-server` normally — the clipboard tunnel is always there.
+
+### 3. Install tmux plugin on the remote server
+
+SSH into your server and add to `~/.tmux.conf` **before** tmux-yank:
+
+```tmux
+set -g @plugin 'drewstone/clipboard-bridge'
+set -g @plugin 'tmux-plugins/tmux-yank'
+```
+
+Then press `prefix + I` to install via TPM.
+
+### Requirements
+- Python 3 (pre-installed on macOS)
+- `osascript` (built-in) — or `brew install pngpaste` for faster image extraction
+- SSH key auth to your server (`ssh-copy-id user@server`)
+
+### Uninstall
+```bash
+tcb uninstall
+```
+
+</details>
+
+<details>
+<summary><b>Linux</b> (X11 or Wayland)</summary>
+
+### 1. Download the CLI tools
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server
+```
+
+### 2. Install clipboard dependencies
+
+```bash
+# X11
+sudo apt install xclip
+
+# Wayland
+sudo apt install wl-clipboard
+```
+
+### 3. SSH config
+
+Add to `~/.ssh/config`:
+
+```
+Host your-server
+    HostName your-server.example.com
+    User your-username
+    RemoteForward 19988 localhost:19988
+```
+
+### 4. Auto-start tcb-server with systemd
+
+```bash
+mkdir -p ~/.config/systemd/user
+
+cat > ~/.config/systemd/user/tcb-server.service <<EOF
+[Unit]
+Description=clipboard-bridge server
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/.local/bin/tcb-server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+
+systemctl --user daemon-reload
+systemctl --user enable --now tcb-server
+```
+
+### 5. Install tmux plugin on the remote server
+
+Add to `~/.tmux.conf` **before** tmux-yank:
 
 ```tmux
 set -g @plugin 'drewstone/clipboard-bridge'
@@ -61,13 +152,95 @@ set -g @plugin 'tmux-plugins/tmux-yank'
 
 Press `prefix + I` to install.
 
-### 4. Use it
+### Requirements
+- Python 3
+- `xclip` (X11) or `wl-clipboard` (Wayland)
+- SSH key auth
 
-- **`Ctrl+V`** — pastes text or image from your Mac clipboard (auto-detects)
-- **`prefix + v`** — same thing, if you prefer a prefixed binding
+### Note on tcb-server (Linux)
+
+The `tcb-server` clipboard detection currently uses `osascript` (macOS). On Linux, you'll need to modify `tcb-server` to use `xclip` / `wl-paste` instead. A cross-platform version is planned — contributions welcome.
+
+</details>
+
+<details>
+<summary><b>Windows</b> (Windows Terminal, WSL)</summary>
+
+### 1. Install in WSL
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb -o ~/.local/bin/tcb && chmod +x ~/.local/bin/tcb
+curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server
+```
+
+### 2. SSH config
+
+Add to `~/.ssh/config` inside WSL:
+
+```
+Host your-server
+    HostName your-server.example.com
+    User your-username
+    RemoteForward 19988 localhost:19988
+```
+
+### 3. Start tcb-server
+
+```bash
+tcb server &
+```
+
+Or add to your `.bashrc`:
+
+```bash
+# Auto-start tcb-server
+if ! nc -z localhost 19988 2>/dev/null; then
+    nohup python3 ~/.local/bin/tcb-server > /dev/null 2>&1 &
+fi
+```
+
+### 4. Install tmux plugin on the remote server
+
+Add to `~/.tmux.conf` **before** tmux-yank:
+
+```tmux
+set -g @plugin 'drewstone/clipboard-bridge'
+set -g @plugin 'tmux-plugins/tmux-yank'
+```
+
+Press `prefix + I` to install.
+
+### Requirements
+- WSL 2
+- Python 3
+- Windows Terminal (supports OSC 52)
+- SSH key auth
+
+### Note on tcb-server (Windows/WSL)
+
+The `tcb-server` clipboard detection currently uses `osascript` (macOS). On WSL, you'll need to modify `tcb-server` to use `powershell.exe Get-Clipboard` or `win32clipboard`. A cross-platform version is planned — contributions welcome.
+
+</details>
+
+## Usage
+
+Once installed, `Ctrl+V` works in remote tmux sessions for both text and images:
+
+- **`Ctrl+V`** — pastes text or image from your local clipboard
+- **`prefix + v`** — same thing (prefixed version)
 - **`prefix + P`** — insert latest image path
 - **`prefix + M-p`** — fzf picker for all uploaded images
-- Mouse selection — highlight persists (doesn't vanish on release)
+- **Mouse drag** — select + copy to local clipboard (highlight persists)
+- **Double-click** — select word
+- **Triple-click** — select line
+
+### Image workflow with Claude Code / Codex
+
+1. Screenshot something on your local machine
+2. Press `Ctrl+V` in the remote tmux pane running Claude Code
+3. Image path appears (e.g., `~/.tmux/clipboard/images/20260301T143022.png`)
+4. Claude Code reads the image file
 
 ## How it works
 
@@ -76,23 +249,23 @@ Press `prefix + I` to install.
 Two mechanisms for maximum compatibility:
 
 1. **OSC 52** — tmux sends clipboard data via escape sequences through SSH to your terminal (handles mouse selection and `y` yank automatically)
-2. **Reverse tunnel** — `Ctrl+V` fetches text from your Mac's clipboard through the tunnel and pastes it
+2. **Reverse tunnel** — `Ctrl+V` fetches text from your local clipboard through the tunnel and pastes it
 
 ### Image clipboard
 
-1. You copy/screenshot an image on your Mac
+1. You copy/screenshot an image locally
 2. Press `Ctrl+V` (or `prefix+v`) in the remote tmux session
 3. The plugin connects to `tcb-server` via the reverse tunnel
-4. Server extracts the image from your Mac clipboard, sends it as base64
+4. Server extracts the image from your clipboard, sends it as base64
 5. Remote script decodes it, saves to `~/.tmux/clipboard/images/`, types the path
-
-For Claude Code / Codex: the image path gets typed into the pane, and the AI agent can read the file.
 
 ## Commands
 
-### Local (on your Mac)
+### Local CLI (`tcb`)
 
 ```
+tcb install <user@host>          One-time setup (SSH config + auto-start server)
+tcb uninstall                    Remove LaunchAgent / service
 tcb server [--port N]            Start clipboard server (default: 19988)
 tcb ssh <user@host> [--port N]   SSH with reverse tunnel (auto-starts server)
 tcb push <user@host> [--type]    One-shot: push clipboard image via SCP
@@ -104,7 +277,7 @@ tcb setup                        Show full setup guide
 
 | Binding | Action |
 |---|---|
-| `Ctrl+V` | Smart paste — text or image from Mac clipboard |
+| `Ctrl+V` | Smart paste — text or image from local clipboard |
 | `prefix + v` | Same as Ctrl+V (prefixed version) |
 | `prefix + P` | Insert latest image path |
 | `prefix + M-p` | fzf picker for uploaded images |
@@ -126,41 +299,19 @@ set -g @tcb_yank_action "copy-pipe-no-clear"      # Selection persistence
 set -g @tcb_image_dir "$HOME/.tmux/clipboard/images"
 ```
 
-## Requirements
-
-- **Remote:** tmux 3.3+ (for `allow-passthrough`), Python 3 (for JSON parsing)
-- **Local (Mac):** Python 3, `osascript` (built-in), optionally `pngpaste` (`brew install pngpaste`)
-- **Terminal:** Any terminal supporting OSC 52 — Warp, iTerm2, Ghostty, Kitty, Alacritty
-
-## Advanced setup
-
-### Auto-start server on Mac login
-
-Run `tcb setup` for LaunchAgent instructions.
-
-### SSH config with permanent tunnel
-
-Add to `~/.ssh/config` on your Mac:
-
-```
-Host myserver
-    HostName your-server.example.com
-    User your-username
-    RemoteForward 19988 localhost:19988
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
-```
-
-Then just `ssh myserver` — the tunnel is always there. Run `tcb server` once and forget about it.
-
 ### Ctrl+V and vim
 
-The `Ctrl+V` binding detects vim/nvim/vi and passes through. To disable bare Ctrl+V:
+The `Ctrl+V` binding detects vim/nvim/vi as the active pane command and passes through automatically. To disable bare Ctrl+V entirely:
 
 ```tmux
 set -g @tcb_ctrl_v "off"
 ```
+
+## Requirements
+
+- **Remote:** tmux 3.3+ (for `allow-passthrough`), Python 3 (for JSON parsing)
+- **Local:** Python 3, platform clipboard tools (see install sections above)
+- **Terminal:** Any terminal supporting OSC 52 — Warp, iTerm2, Ghostty, Kitty, Alacritty, Windows Terminal
 
 ## License
 

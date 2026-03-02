@@ -383,12 +383,184 @@ Then: launchctl load ~/Library/LaunchAgents/com.tcb.server.plist
 SETUP
 }
 
+# ── Install command ─────────────────────────────────────────────────────────
+cmd_install() {
+    local remote_host=""
+    local port="$SERVER_PORT"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port|-p) port="$2"; shift 2 ;;
+            --help|-h) echo "Usage: tcb install <user@host> [--port N]"; exit 0 ;;
+            -*)  err "Unknown option: $1"; exit 1 ;;
+            *)
+                if [ -z "$remote_host" ]; then
+                    remote_host="$1"
+                else
+                    err "Unexpected argument: $1"; exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$remote_host" ]; then
+        err "Usage: tcb install <user@host> [--port N]"
+        exit 1
+    fi
+
+    # Extract the Host alias (just the hostname part for SSH config)
+    local ssh_host
+    ssh_host="${remote_host#*@}"
+
+    info "Setting up clipboard-bridge for $remote_host..."
+
+    # ── 1. SSH config: add RemoteForward ───────────────────────────────────
+    local ssh_config="$HOME/.ssh/config"
+    mkdir -p "$HOME/.ssh/sockets"
+
+    if [ -f "$ssh_config" ] && grep -q "RemoteForward ${port} localhost:${port}" "$ssh_config" 2>/dev/null; then
+        ok "SSH config already has RemoteForward for port $port"
+    else
+        info "Adding RemoteForward to $ssh_config..."
+
+        # Check if Host block already exists
+        if [ -f "$ssh_config" ] && grep -q "^Host ${ssh_host}$" "$ssh_config" 2>/dev/null; then
+            # Host block exists — insert RemoteForward after the Host line
+            # Use a temp file for portability (BSD sed differs from GNU sed)
+            local tmp_config
+            tmp_config="$(mktemp)"
+            awk -v host="$ssh_host" -v fwd="    RemoteForward ${port} localhost:${port}" '
+                $0 ~ "^Host " host "$" { print; print fwd; next }
+                { print }
+            ' "$ssh_config" > "$tmp_config"
+            mv "$tmp_config" "$ssh_config"
+            ok "Added RemoteForward to existing Host $ssh_host block"
+        else
+            # Add new Host block
+            cat >> "$ssh_config" <<SSH_BLOCK
+
+Host ${ssh_host}
+    RemoteForward ${port} localhost:${port}
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+SSH_BLOCK
+            ok "Added Host $ssh_host block with RemoteForward to $ssh_config"
+        fi
+        chmod 600 "$ssh_config"
+    fi
+
+    # ── 2. LaunchAgent: auto-start tcb-server ──────────────────────────────
+    local plist_dir="$HOME/Library/LaunchAgents"
+    local plist_path="$plist_dir/com.clipboard-bridge.server.plist"
+    local tcb_server_bin=""
+
+    # Find tcb-server
+    if [ -f "${SCRIPT_DIR}/tcb-server" ]; then
+        tcb_server_bin="${SCRIPT_DIR}/tcb-server"
+    elif command -v tcb-server >/dev/null 2>&1; then
+        tcb_server_bin="$(command -v tcb-server)"
+    fi
+
+    if [ -z "$tcb_server_bin" ]; then
+        warn "tcb-server not found, skipping LaunchAgent setup."
+        warn "Install it: curl -fsSL https://raw.githubusercontent.com/drewstone/clipboard-bridge/main/local/tcb-server -o ~/.local/bin/tcb-server && chmod +x ~/.local/bin/tcb-server"
+    else
+        # Resolve to absolute path
+        tcb_server_bin="$(cd "$(dirname "$tcb_server_bin")" && pwd)/$(basename "$tcb_server_bin")"
+
+        # Unload existing if present
+        if [ -f "$plist_path" ]; then
+            launchctl unload "$plist_path" 2>/dev/null || true
+        fi
+
+        mkdir -p "$plist_dir"
+        local log_dir="$HOME/Library/Logs"
+        mkdir -p "$log_dir"
+
+        cat > "$plist_path" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.clipboard-bridge.server</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>${tcb_server_bin}</string>
+        <string>--port</string>
+        <string>${port}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${log_dir}/tcb-server.log</string>
+    <key>StandardErrorPath</key>
+    <string>${log_dir}/tcb-server.log</string>
+</dict>
+</plist>
+PLIST
+
+        launchctl load "$plist_path" 2>/dev/null
+        ok "LaunchAgent installed — tcb-server starts on login"
+        ok "Logs: $log_dir/tcb-server.log"
+
+        # Verify it's running
+        sleep 1
+        if nc -z localhost "$port" 2>/dev/null; then
+            ok "tcb-server is running on port $port"
+        else
+            warn "tcb-server may not have started. Check: cat $log_dir/tcb-server.log"
+        fi
+    fi
+
+    # ── 3. Summary ─────────────────────────────────────────────────────────
+    echo ""
+    ok "Installation complete!"
+    echo ""
+    info "What was set up:"
+    info "  1. SSH config: RemoteForward ${port} on Host ${ssh_host}"
+    info "  2. LaunchAgent: tcb-server auto-starts on login"
+    echo ""
+    info "Now just SSH normally:"
+    info "  ssh $remote_host"
+    info "Then in tmux: Ctrl+V pastes text or images from your Mac clipboard."
+    echo ""
+    info "To uninstall: tcb uninstall"
+}
+
+# ── Uninstall command ──────────────────────────────────────────────────────
+cmd_uninstall() {
+    local plist_path="$HOME/Library/LaunchAgents/com.clipboard-bridge.server.plist"
+
+    info "Uninstalling clipboard-bridge..."
+
+    # Stop and remove LaunchAgent
+    if [ -f "$plist_path" ]; then
+        launchctl unload "$plist_path" 2>/dev/null || true
+        rm -f "$plist_path"
+        ok "Removed LaunchAgent"
+    else
+        info "No LaunchAgent found"
+    fi
+
+    warn "SSH config (~/.ssh/config) was not modified — remove the RemoteForward line manually if needed."
+    ok "Uninstall complete."
+}
+
 # ── Help ───────────────────────────────────────────────────────────────────
 cmd_help() {
     cat <<HELP
 tcb - clipboard-bridge local CLI (v$VERSION)
 
 Usage:
+    tcb install <user@host>          Set up everything (SSH config + auto-start server)
+    tcb uninstall                    Remove LaunchAgent
     tcb server [--port N]            Start clipboard server (default port: $SERVER_PORT)
     tcb ssh <user@host> [--port N]   SSH with reverse tunnel (auto-starts server)
     tcb push <user@host> [--type]    Push clipboard image to remote (one-shot)
@@ -396,9 +568,11 @@ Usage:
     tcb setup                        Show full setup guide
     tcb help                         Show this message
 
+Recommended setup:
+    tcb install drew@myserver        One-time setup, then just 'ssh myserver'
+
 Quick start:
     tcb ssh drew@myserver            Starts server + SSH with reverse tunnel
-                                     Then Ctrl+V / prefix+v works in remote tmux
 
 One-shot mode:
     tcb push drew@myserver --type    Upload clipboard image + type path into pane
@@ -412,11 +586,13 @@ HELP
 
 # ── Main ───────────────────────────────────────────────────────────────────
 case "${1:-help}" in
-    server) shift; cmd_server "$@" ;;
-    ssh)    shift; cmd_ssh "$@" ;;
-    push)   shift; cmd_push "$@" ;;
-    clean)  shift; cmd_clean "$@" ;;
-    setup)  cmd_setup ;;
+    install)    shift; cmd_install "$@" ;;
+    uninstall)  cmd_uninstall ;;
+    server)     shift; cmd_server "$@" ;;
+    ssh)        shift; cmd_ssh "$@" ;;
+    push)       shift; cmd_push "$@" ;;
+    clean)      shift; cmd_clean "$@" ;;
+    setup)      cmd_setup ;;
     help|--help|-h) cmd_help ;;
-    *)      err "Unknown command: $1"; cmd_help; exit 1 ;;
+    *)          err "Unknown command: $1"; cmd_help; exit 1 ;;
 esac
