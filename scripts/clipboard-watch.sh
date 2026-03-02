@@ -5,7 +5,7 @@
 # Polls tcb-server via the reverse tunnel. When the clipboard changes
 # to an image, auto-saves it and updates a "latest.png" symlink.
 #
-# Usage: clipboard-watch.sh [port] [image-dir] [interval-seconds]
+# Usage: clipboard-watch.sh [port] [image-dir] [interval-seconds] [cleanup-age-seconds]
 
 CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${CURRENT_DIR}/helpers.sh"
@@ -13,18 +13,20 @@ source "${CURRENT_DIR}/helpers.sh"
 PORT="${1:-19988}"
 IMAGE_DIR="${2:-$HOME/.tmux/clipboard/images}"
 INTERVAL="${3:-3}"
+CLEANUP_AGE="${4:-3600}"
 
 mkdir -p "$IMAGE_DIR"
 
 echo $$ > "$IMAGE_DIR/.watcher.pid"
 trap 'rm -f "$IMAGE_DIR/.watcher.pid"' EXIT
 
-exec python3 - "$PORT" "$IMAGE_DIR" "$INTERVAL" <<'PYTHON'
+exec python3 - "$PORT" "$IMAGE_DIR" "$INTERVAL" "$CLEANUP_AGE" <<'PYTHON'
 import socket, json, base64, sys, os, time, hashlib, subprocess
 
 port = int(sys.argv[1])
 image_dir = sys.argv[2]
 interval = int(sys.argv[3])
+cleanup_age = int(sys.argv[4])
 last_hash = ""
 
 def fetch_clipboard(port):
@@ -108,14 +110,20 @@ while True:
         size_kb = len(img_data) // 1024
         tmux_message(f"tcb: image synced ({size_kb}KB) -> {latest}")
 
-        # Cleanup old images (keep 50)
-        pngs = sorted(
-            [os.path.join(image_dir, f) for f in os.listdir(image_dir)
-             if f.endswith(".png") and f != "latest.png" and not f.startswith(".")],
-            key=os.path.getmtime, reverse=True
-        )
-        for old in pngs[50:]:
-            os.unlink(old)
+        # Cleanup images older than configured age
+        now = time.time()
+        max_age = cleanup_age
+        for f in os.listdir(image_dir):
+            if not f.endswith(".png") or f == "latest.png" or f.startswith("."):
+                continue
+            fpath = os.path.join(image_dir, f)
+            if fpath == img_path:
+                continue  # skip the one we just saved
+            try:
+                if now - os.path.getmtime(fpath) > max_age:
+                    os.unlink(fpath)
+            except OSError:
+                pass
 
     except Exception:
         continue

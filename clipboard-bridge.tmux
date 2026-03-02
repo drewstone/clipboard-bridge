@@ -94,6 +94,7 @@ tmux bind-key "$TCB_PASTE_KEY" \
 # No keypresses needed — images are always available.
 TCB_WATCH="$(get_tmux_option "@tcb_watch" "on")"
 TCB_WATCH_INTERVAL="$(get_tmux_option "@tcb_watch_interval" "3")"
+TCB_CLEANUP_AGE="$(get_tmux_option "@tcb_cleanup_age" "3600")"  # seconds, default 1 hour
 
 if [ "$TCB_WATCH" = "on" ]; then
     # Kill any existing watcher
@@ -105,6 +106,6 @@ if [ "$TCB_WATCH" = "on" ]; then
     fi
     # Start watcher in background
     nohup "${SCRIPTS_DIR}/clipboard-watch.sh" \
-        "$TCB_SERVER_PORT" "$TCB_IMAGE_DIR" "$TCB_WATCH_INTERVAL" \
+        "$TCB_SERVER_PORT" "$TCB_IMAGE_DIR" "$TCB_WATCH_INTERVAL" "$TCB_CLEANUP_AGE" \
         >/dev/null 2>&1 &
 fi
