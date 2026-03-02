@@ -293,19 +293,18 @@ set -g @tcb_server_port "19988"                   # Reverse tunnel port
 set -g @tcb_paste_key "v"                         # prefix + ? for smart paste
 set -g @tcb_image_latest_key "P"                  # prefix + ? for latest image
 set -g @tcb_image_pick_key "M-p"                  # prefix + ? for fzf picker
-set -g @tcb_ctrl_v "on"                           # Bind bare Ctrl+V (off to disable)
 set -g @tcb_passthrough "on"                      # OSC 52 passthrough mode
 set -g @tcb_yank_action "copy-pipe-no-clear"      # Selection persistence
 set -g @tcb_image_dir "$HOME/.tmux/clipboard/images"
+set -g @tcb_watch "on"                            # Auto-sync clipboard watcher
+set -g @tcb_watch_interval "3"                    # Watcher poll interval (seconds)
 ```
 
-### Ctrl+V and vim
+### Auto-sync clipboard watcher
 
-The `Ctrl+V` binding detects vim/nvim/vi as the active pane command and passes through automatically. To disable bare Ctrl+V entirely:
+When `@tcb_watch` is `on` (default), a background process polls `tcb-server` every few seconds. When it detects a new image on your clipboard, it automatically saves it to the image directory and updates the `latest.png` symlink. No keypress needed — images are always available at `~/.tmux/clipboard/images/latest.png`.
 
-```tmux
-set -g @tcb_ctrl_v "off"
-```
+This is especially useful with Claude Code and Codex, which intercept Ctrl+V/Cmd+V before tmux can handle it. Just copy/screenshot on your Mac and reference `~/.tmux/clipboard/images/latest.png` in the chat.
 
 ## Requirements
 
