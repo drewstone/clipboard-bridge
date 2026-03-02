@@ -301,7 +301,7 @@ cmd_ssh() {
 
     info "Connecting to $remote_host with reverse tunnel on port $port..."
     echo ""
-    exec ssh -R "${port}:localhost:${port}" "${extra_args[@]}" "$remote_host"
+    exec ssh -R "${port}:localhost:${port}" ${extra_args[@]+"${extra_args[@]}"} "$remote_host"
 }
 
 # ── Setup guide ────────────────────────────────────────────────────────────
