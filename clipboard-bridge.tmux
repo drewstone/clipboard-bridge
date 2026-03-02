@@ -88,14 +88,23 @@ tmux bind-key "$TCB_IMAGE_PICK_KEY" \
 tmux bind-key "$TCB_PASTE_KEY" \
     run-shell "${SCRIPTS_DIR}/clipboard-paste.sh '${TCB_SERVER_PORT}' '${TCB_IMAGE_DIR}'"
 
-# C-v (no prefix): same as above, but passes through to vim/nvim/vi
-# when those are the active pane command. Configurable via @tcb_ctrl_v.
-TCB_CTRL_V="$(get_tmux_option "@tcb_ctrl_v" "on")"
-if [ "$TCB_CTRL_V" = "on" ]; then
-    tmux bind-key -n C-v \
-        if-shell 'test "$(tmux display-message -p "#{pane_current_command}")" = "vim" -o \
-                       "$(tmux display-message -p "#{pane_current_command}")" = "nvim" -o \
-                       "$(tmux display-message -p "#{pane_current_command}")" = "vi"' \
-            'send-keys C-v' \
-            "run-shell '${SCRIPTS_DIR}/clipboard-paste.sh ${TCB_SERVER_PORT} ${TCB_IMAGE_DIR}'"
+# ── 8. Auto-sync clipboard watcher ────────────────────────────────────────
+# Runs in background, polls tcb-server every few seconds. When clipboard
+# changes to an image, auto-saves it and updates a "latest.png" symlink.
+# No keypresses needed — images are always available.
+TCB_WATCH="$(get_tmux_option "@tcb_watch" "on")"
+TCB_WATCH_INTERVAL="$(get_tmux_option "@tcb_watch_interval" "3")"
+
+if [ "$TCB_WATCH" = "on" ]; then
+    # Kill any existing watcher
+    if [ -f "${TCB_IMAGE_DIR}/.watcher.pid" ]; then
+        old_pid="$(cat "${TCB_IMAGE_DIR}/.watcher.pid" 2>/dev/null)"
+        if [ -n "$old_pid" ]; then
+            kill "$old_pid" 2>/dev/null || true
+        fi
+    fi
+    # Start watcher in background
+    nohup "${SCRIPTS_DIR}/clipboard-watch.sh" \
+        "$TCB_SERVER_PORT" "$TCB_IMAGE_DIR" "$TCB_WATCH_INTERVAL" \
+        >/dev/null 2>&1 &
 fi

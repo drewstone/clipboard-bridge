@@ -2,12 +2,8 @@
 #
 # clipboard-paste.sh — Smart clipboard paste via SSH reverse tunnel
 #
-# Connects to tcb-server on the local machine (via reverse tunnel),
-# fetches clipboard content (text or image), and pastes accordingly:
-#   - Text: types it into the active tmux pane
-#   - Image: saves to clipboard dir, types the file path
-#
-# Falls back to tmux paste-buffer if the tunnel is unavailable.
+# Connects to tcb-server, fetches clipboard (text or image), pastes.
+# Falls back to tmux paste-buffer if tunnel unavailable.
 #
 # Usage: clipboard-paste.sh [port] [image-dir]
 
@@ -18,101 +14,100 @@ source "${CURRENT_DIR}/helpers.sh"
 
 PORT="${1:-19988}"
 IMAGE_DIR="${2:-$HOME/.tmux/clipboard/images}"
-
 mkdir -p "$IMAGE_DIR"
 
-# ── Connect to tcb-server via reverse tunnel ───────────────────────────────
-fetch_clipboard() {
-    local response=""
-    local length=""
+# Use Python for reliable TCP read of large payloads (nc truncates)
+python3 - "$PORT" "$IMAGE_DIR" <<'PYTHON'
+import socket, json, base64, sys, os, time, subprocess
 
-    # Connect and read length-prefixed response
-    # Use timeout to avoid hanging if tunnel is down
-    response="$(echo "" | nc -w 2 localhost "$PORT" 2>/dev/null)" || return 1
+port = int(sys.argv[1])
+image_dir = sys.argv[2]
 
-    if [ -z "$response" ]; then
-        return 1
-    fi
+def fetch_clipboard():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(10)
+    try:
+        sock.connect(("127.0.0.1", port))
+        sock.sendall(b"\n")
+        header = b""
+        while b"\n" not in header:
+            chunk = sock.recv(1024)
+            if not chunk:
+                return None
+            header += chunk
+        length_str, _, rest = header.partition(b"\n")
+        expected = int(length_str)
+        data = rest
+        while len(data) < expected:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        return json.loads(data[:expected].decode("utf-8"))
+    except Exception:
+        return None
+    finally:
+        sock.close()
 
-    # Response is: <length>\n<json>
-    # Extract the JSON part (everything after first newline)
-    local json_data
-    json_data="$(echo "$response" | tail -n +2)"
+def tmux_msg(msg, duration=5000):
+    try:
+        saved = subprocess.run(
+            ["tmux", "show-option", "-gqv", "display-time"],
+            capture_output=True, text=True
+        ).stdout.strip() or "750"
+        subprocess.run(["tmux", "set-option", "-gq", "display-time", str(duration)])
+        subprocess.run(["tmux", "display-message", msg])
+        subprocess.run(["tmux", "set-option", "-gq", "display-time", saved])
+    except Exception:
+        pass
 
-    if [ -z "$json_data" ]; then
-        # Maybe no length prefix, try whole response as JSON
-        json_data="$response"
-    fi
+cb = fetch_clipboard()
 
-    echo "$json_data"
-}
+if cb is None:
+    result = subprocess.run(["tmux", "paste-buffer", "-p"], capture_output=True)
+    if result.returncode != 0:
+        tmux_msg(f"tcb: tunnel unavailable. Run tcb-server + SSH with RemoteForward {port}")
+    sys.exit(0)
 
-# ── Parse JSON without jq (use python3 which is available on most systems) ─
-json_get() {
-    local json="$1"
-    local key="$2"
-    python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d.get('$key',''))" <<< "$json"
-}
+cb_type = cb.get("type", "")
 
-# ── Main ───────────────────────────────────────────────────────────────────
-clipboard_json="$(fetch_clipboard)" || {
-    # Tunnel unavailable — fall back to tmux paste buffer
+if cb_type == "text":
+    text = cb.get("data", "")
+    if text:
+        subprocess.run(["tmux", "load-buffer", "-"], input=text.encode(), capture_output=True)
+        subprocess.run(["tmux", "paste-buffer", "-p"])
+    else:
+        tmux_msg("tcb: clipboard is empty")
+
+elif cb_type == "image":
+    img_b64 = cb.get("data", "")
+    if not img_b64:
+        tmux_msg("tcb: failed to read clipboard image")
+        sys.exit(1)
+
+    img_data = base64.b64decode(img_b64)
+    timestamp = time.strftime("%Y%m%dT%H%M%S")
+    img_path = os.path.join(image_dir, f"{timestamp}.png")
+
+    with open(img_path, "wb") as f:
+        f.write(img_data)
+
+    latest = os.path.join(image_dir, "latest.png")
+    if os.path.islink(latest) or os.path.exists(latest):
+        os.unlink(latest)
+    os.symlink(img_path, latest)
+
+    size_kb = len(img_data) // 1024
+    subprocess.run(["tmux", "send-keys", "-l", img_path])
+    tmux_msg(f"tcb: pasted image ({size_kb}KB) -> {img_path}")
+
+elif cb_type == "error":
+    tmux_msg(f"tcb: server error: {cb.get('data', 'unknown')}")
+else:
+    tmux_msg(f"tcb: unknown clipboard type: {cb_type}")
+PYTHON
+
+if [ $? -ne 0 ]; then
     tmux paste-buffer -p 2>/dev/null || \
-        tcb_display_message "tcb: tunnel unavailable. Start tcb-server on your Mac and SSH with -R ${PORT}:localhost:${PORT}"
-    exit 0
-}
-
-cb_type="$(json_get "$clipboard_json" "type")"
-
-case "$cb_type" in
-    text)
-        data="$(json_get "$clipboard_json" "data")"
-        if [ -n "$data" ]; then
-            # Use tmux load-buffer + paste-buffer for proper handling of
-            # multiline text, special characters, etc.
-            printf '%s' "$data" | tmux load-buffer -
-            tmux paste-buffer -p
-        else
-            tcb_display_message "tcb: clipboard is empty"
-        fi
-        ;;
-
-    image)
-        data="$(json_get "$clipboard_json" "data")"
-        if [ -z "$data" ]; then
-            tcb_display_message "tcb: failed to read clipboard image"
-            exit 1
-        fi
-
-        timestamp="$(date '+%Y%m%dT%H%M%S')"
-        img_path="${IMAGE_DIR}/${timestamp}.png"
-
-        # Decode base64 image and save
-        printf '%s' "$data" | base64 -d > "$img_path" 2>/dev/null
-
-        if [ ! -s "$img_path" ]; then
-            rm -f "$img_path"
-            tcb_display_message "tcb: failed to decode clipboard image"
-            exit 1
-        fi
-
-        size_kb="$(( $(stat -c '%s' "$img_path") / 1024 ))"
-
-        # Type the path into the active pane
-        tmux send-keys -l "$img_path"
-        tcb_display_message "tcb: pasted image (${size_kb}KB) → ${img_path}"
-
-        # Clean old images (keep last 50)
-        find "$IMAGE_DIR" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null \
-            | sort -rn | tail -n +51 | cut -d' ' -f2- | xargs -r rm -f
-        ;;
-
-    error)
-        msg="$(json_get "$clipboard_json" "data")"
-        tcb_display_message "tcb: server error: $msg"
-        ;;
-
-    *)
-        tcb_display_message "tcb: unknown clipboard type: $cb_type"
-        ;;
-esac
+        tcb_display_message "tcb: paste failed (is tcb-server running?)"
+fi
