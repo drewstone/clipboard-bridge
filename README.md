@@ -306,6 +306,18 @@ When `@tcb_watch` is `on` (default), a background process polls `tcb-server` eve
 
 This is especially useful with Claude Code and Codex, which intercept Ctrl+V/Cmd+V before tmux can handle it. Just copy/screenshot on your Mac and reference `~/.tmux/clipboard/images/latest.png` in the chat.
 
+### Tip: Teach your AI agents about `latest.png`
+
+Add this to your AI agent's memory/instructions (e.g. `CLAUDE.md`, `.openclaw`, `.codex`):
+
+```
+When the user says "check the latest screenshot", "look at $IMG", or similar —
+read the file at: /home/drew/.tmux/clipboard/images/latest.png
+This is automatically synced from the user's macOS clipboard via clipboard-bridge.
+```
+
+This way you can just say "look at the latest screenshot" and the agent knows where to find it.
+
 ## Requirements
 
 - **Remote:** tmux 3.3+ (for `allow-passthrough`), Python 3 (for JSON parsing)
