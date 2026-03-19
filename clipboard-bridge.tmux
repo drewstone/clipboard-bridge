@@ -23,6 +23,7 @@ TCB_PASTE_KEY="$(get_tmux_option "@tcb_paste_key" "v")"
 TCB_PASSTHROUGH="$(get_tmux_option "@tcb_passthrough" "on")"
 TCB_YANK_ACTION="$(get_tmux_option "@tcb_yank_action" "copy-pipe-no-clear")"
 TCB_SERVER_PORT="$(get_tmux_option "@tcb_server_port" "19988")"
+TCB_IMAGE_STACK_SIZE="$(get_tmux_option "@tcb_image_stack_size" "20")"
 
 # ── 1. Enable allow-passthrough for OSC 52 ────────────────────────────────
 if [ "$TCB_PASSTHROUGH" != "off" ]; then
@@ -86,7 +87,7 @@ tmux bind-key "$TCB_IMAGE_PICK_KEY" \
 # tcb-server running on the local side through SSH reverse tunnel.
 # Falls back to tmux paste-buffer if tunnel is unavailable.
 tmux bind-key "$TCB_PASTE_KEY" \
-    run-shell "${SCRIPTS_DIR}/clipboard-paste.sh '${TCB_SERVER_PORT}' '${TCB_IMAGE_DIR}'"
+    run-shell "${SCRIPTS_DIR}/clipboard-paste.sh '${TCB_SERVER_PORT}' '${TCB_IMAGE_DIR}' '${TCB_IMAGE_STACK_SIZE}'"
 
 # ── 8. Auto-sync clipboard watcher ────────────────────────────────────────
 # Runs in background, polls tcb-server every few seconds. When clipboard
@@ -106,6 +107,6 @@ if [ "$TCB_WATCH" = "on" ]; then
     fi
     # Start watcher in background
     nohup "${SCRIPTS_DIR}/clipboard-watch.sh" \
-        "$TCB_SERVER_PORT" "$TCB_IMAGE_DIR" "$TCB_WATCH_INTERVAL" "$TCB_CLEANUP_AGE" \
+        "$TCB_SERVER_PORT" "$TCB_IMAGE_DIR" "$TCB_WATCH_INTERVAL" "$TCB_CLEANUP_AGE" "$TCB_IMAGE_STACK_SIZE" \
         >/dev/null 2>&1 &
 fi
