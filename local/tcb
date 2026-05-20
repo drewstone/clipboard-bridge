@@ -29,6 +29,7 @@ REMOTE_IMAGE_DIR="${TCB_REMOTE_IMAGE_DIR:-.tmux/clipboard/images}"
 MAX_IMAGES="${TCB_MAX_IMAGES:-50}"
 SERVER_PORT="${TCB_SERVER_PORT:-19988}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TCB_SSH_REUSE_MASTER="${TCB_SSH_REUSE_MASTER:-0}"
 
 # ── Colors ─────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -299,9 +300,24 @@ cmd_ssh() {
         ok "Clipboard server already running on port $port"
     fi
 
+    local tunnel_args=(
+        -o ExitOnForwardFailure=yes
+        -R "${port}:localhost:${port}"
+    )
+    if [ "$TCB_SSH_REUSE_MASTER" != "1" ]; then
+        # A multiplexed SSH session can reuse an existing ControlMaster that
+        # was opened without this reverse forward, leaving remote tmux with no
+        # listener on 127.0.0.1:$port. Force this tunnel session to make its
+        # own connection by default so -R is actually negotiated.
+        tunnel_args=(-S none -o ControlMaster=no "${tunnel_args[@]}")
+    fi
+
     info "Connecting to $remote_host with reverse tunnel on port $port..."
+    if [ "$TCB_SSH_REUSE_MASTER" != "1" ]; then
+        info "ControlMaster reuse disabled for this tunnel session"
+    fi
     echo ""
-    exec ssh -R "${port}:localhost:${port}" ${extra_args[@]+"${extra_args[@]}"} "$remote_host"
+    exec ssh "${tunnel_args[@]}" ${extra_args[@]+"${extra_args[@]}"} "$remote_host"
 }
 
 # ── Setup guide ────────────────────────────────────────────────────────────
@@ -581,6 +597,7 @@ Environment:
     TCB_SERVER_PORT         Server port (default: $SERVER_PORT)
     TCB_REMOTE_IMAGE_DIR    Remote image path (default: $REMOTE_IMAGE_DIR)
     TCB_MAX_IMAGES          Max images to keep (default: $MAX_IMAGES)
+    TCB_SSH_REUSE_MASTER=1  Allow tcb ssh to reuse SSH ControlMaster sessions
 HELP
 }
 
