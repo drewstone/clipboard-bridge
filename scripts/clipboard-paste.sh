@@ -3,7 +3,7 @@
 # clipboard-paste.sh — Smart clipboard paste via SSH reverse tunnel
 #
 # Connects to tcb-server, fetches clipboard (text or image), pastes.
-# Falls back to tmux paste-buffer if tunnel unavailable.
+# Fails loud when the tunnel is unavailable so paste issues are diagnosable.
 #
 # Usage: clipboard-paste.sh [port] [image-dir] [stack-size]
 
@@ -42,7 +42,10 @@ def fetch_clipboard():
         while b'\n' not in header:
             chunk = sock.recv(1024)
             if not chunk:
-                return None
+                return {
+                    'type': 'error',
+                    'data': f'empty response from 127.0.0.1:{port}; SSH tunnel closed before clipboard header',
+                }
             header += chunk
         length_str, _, rest = header.partition(b'\n')
         expected = int(length_str)
@@ -53,8 +56,21 @@ def fetch_clipboard():
                 break
             data += chunk
         return json.loads(data[:expected].decode('utf-8'))
-    except Exception:
-        return None
+    except ConnectionRefusedError:
+        return {
+            'type': 'error',
+            'data': f'no listener on 127.0.0.1:{port}; start laptop tcb-server and SSH with RemoteForward {port} localhost:{port}',
+        }
+    except socket.timeout:
+        return {
+            'type': 'error',
+            'data': f'timeout connecting to 127.0.0.1:{port}; SSH tunnel is stale or tcb-server is hung',
+        }
+    except Exception as exc:
+        return {
+            'type': 'error',
+            'data': f'clipboard bridge unavailable: {type(exc).__name__}: {exc}',
+        }
     finally:
         sock.close()
 
@@ -74,12 +90,11 @@ def tmux_msg(msg, duration=5000):
 
 
 cb = fetch_clipboard()
-
-if cb is None:
-    result = subprocess.run(['tmux', 'paste-buffer', '-p'], capture_output=True)
-    if result.returncode != 0:
-        tmux_msg(f'tcb: tunnel unavailable. Run tcb-server + SSH with RemoteForward {port}')
-    sys.exit(0)
+if not isinstance(cb, dict):
+    cb = {
+        'type': 'error',
+        'data': 'clipboard bridge returned an invalid response',
+    }
 
 cb_type = cb.get('type', '')
 

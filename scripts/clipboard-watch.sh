@@ -38,6 +38,7 @@ cleanup_age = int(sys.argv[4])
 stack_size = int(sys.argv[5])
 stack_helper = sys.argv[6]
 last_hash = ''
+tmux_env = os.environ.get('TMUX', '')
 
 
 def fetch_clipboard(port):
@@ -68,6 +69,8 @@ def fetch_clipboard(port):
 
 
 def tmux_message(msg, duration=3000):
+    if not tmux_env:
+        return
     try:
         saved = subprocess.run(
             ['tmux', 'show-option', '-gqv', 'display-time'],
