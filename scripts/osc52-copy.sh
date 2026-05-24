@@ -2,14 +2,13 @@
 #
 # osc52-copy.sh - Copy stdin to system clipboard via OSC 52 escape sequence
 #
-# When running inside tmux with allow-passthrough=on, wraps the OSC 52
-# sequence in DCS passthrough so it reaches the outer terminal emulator.
+# When running inside tmux, writes the OSC 52 sequence to the attached client
+# tty. Writing to the pane tty sends bytes to the foreground application.
 #
 # Used as @override_copy_command for tmux-yank and as the pipe target
 # for MouseDragEnd1Pane bindings.
 #
 # OSC 52 format:     ESC ] 52 ; c ; <base64> BEL
-# DCS passthrough:   ESC P tmux ; ESC <inner-sequence> ESC \
 
 set -euo pipefail
 
@@ -17,6 +16,12 @@ buf="$(cat)"
 
 if [ -z "$buf" ]; then
     exit 0
+fi
+
+if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    # tmux can report success even when the outer SSH client or terminal
+    # ignores the clipboard write, so still emit the OSC 52 fallback below.
+    printf '%s' "$buf" | tmux load-buffer -w - 2>/dev/null || true
 fi
 
 # Base64 encode without line wrapping.
@@ -36,21 +41,19 @@ if [ "${#b64}" -gt "$max_bytes" ]; then
     fi
 fi
 
-# Determine output target - write to pane tty so tmux can forward via passthrough
-if [ -n "${TMUX:-}" ]; then
-    pane_tty="$(tmux display-message -p '#{pane_tty}' 2>/dev/null || true)"
-    if [ -z "$pane_tty" ] || [ ! -w "$pane_tty" ]; then
-        pane_tty="/dev/tty"
+# Determine output target. copy-pipe runs outside the pane, so the escape
+# sequence must go to the attached terminal client.
+target_tty=""
+if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+    target_tty="$(tmux display-message -p '#{client_tty}' 2>/dev/null || true)"
+    if [ -z "$target_tty" ] || [ ! -w "$target_tty" ]; then
+        target_tty="$(tmux list-clients -F '#{client_tty}' 2>/dev/null | head -n 1 || true)"
     fi
 else
-    pane_tty="/dev/tty"
+    target_tty="/dev/tty"
 fi
 
-# Emit OSC 52 - "c" = clipboard selection
-if [ -n "${TMUX:-}" ]; then
-    # Inside tmux: wrap in DCS passthrough (double the inner ESC)
-    printf '\033Ptmux;\033\033]52;c;%s\a\033\\' "$b64" > "$pane_tty"
-else
-    # Outside tmux: emit directly
-    printf '\033]52;c;%s\a' "$b64" > "$pane_tty"
+if [ -n "$target_tty" ] && [ -w "$target_tty" ]; then
+    # Emit OSC 52 - "c" = clipboard selection
+    printf '\033]52;c;%s\a' "$b64" > "$target_tty"
 fi

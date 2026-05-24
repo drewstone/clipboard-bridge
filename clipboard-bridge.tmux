@@ -101,7 +101,8 @@ if [ "$TCB_WATCH" = "on" ]; then
     # Kill any existing watcher
     if [ -f "${TCB_IMAGE_DIR}/.watcher.pid" ]; then
         old_pid="$(cat "${TCB_IMAGE_DIR}/.watcher.pid" 2>/dev/null)"
-        if [ -n "$old_pid" ]; then
+        old_args="$(ps -p "$old_pid" -o args= 2>/dev/null || true)"
+        if [ -n "$old_pid" ] && [[ "$old_args" == *"update-image-stack.py"* ]]; then
             kill "$old_pid" 2>/dev/null || true
         fi
     fi
